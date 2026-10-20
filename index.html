@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GOBBLER POS Backup</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color: #1a1a1a; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { color: #e8e8e8; background: #161616; } a { color: #8ab4f8; } }
+</style>
+</head>
+<body>
+<h1>GOBBLER POS Backup</h1>
+<p>GOBBLER POS Backup is a private, single-user tool. It copies encrypted backups of its owner's own point-of-sale database into a folder in the owner's own Google Drive, once a day, so that the owner can recover the data if the primary database is lost.</p>
+
+<h2>What the app does</h2>
+<ul>
+  <li>Runs on a schedule in the owner's private GitHub repository.</li>
+  <li>Encrypts each backup before it leaves the GitHub runner, so the files stored in Google Drive are unreadable without the owner's passphrase.</li>
+  <li>Uploads the encrypted files to one folder in the owner's Google Drive, checks them, and removes old backups according to a retention rule.</li>
+</ul>
+
+<h2>Google access</h2>
+<p>The app requests a single Google permission, <code>https://www.googleapis.com/auth/drive.file</code>. This permission allows the app to see and change only the files the app itself created. It cannot see any other file in the owner's Google Drive.</p>
+
+<h2>Who can use it</h2>
+<p>This is not a public service. It has one user, its owner, who authorises it with their own Google account. Nobody else is asked to sign in.</p>
+
+<p>Please read the <a href="https://cholacoffeedev-lab.github.io/privacy.html">Privacy Policy</a>.</p>
+
+<p>Contact: <a href="https://github.com/cholacoffeedev-lab">github.com/cholacoffeedev-lab</a></p>
+</body>
+</html>
