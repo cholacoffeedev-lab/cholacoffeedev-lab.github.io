@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.supabase.co; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>POS</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --mut:#666; --card:#f3f3f6; --line:#d4d4dc; --acc:#1b5fd1; --ok:#127a3b; --bad:#b3261e; --warn:#8a5a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141416; --fg:#ececf0; --mut:#a0a0aa; --card:#212126; --line:#3a3a42; --acc:#6aa0ff; --ok:#58c47f; --bad:#ff8a80; --warn:#f0b955; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  main { max-width: 640px; margin: 0 auto; padding: .5rem .75rem 5rem; }
+  button, input, select { font: inherit; color: inherit; }
+  button { border:1px solid var(--line); background:var(--card); border-radius:.6rem; padding:.7rem .9rem; min-height:2.75rem; }
+  button.primary { background:var(--acc); color:#fff; border-color:var(--acc); font-weight:600; }
+  button.danger { color:var(--bad); }
+  button:disabled { opacity:.45; }
+  input, select { width:100%; border:1px solid var(--line); background:var(--bg); border-radius:.5rem; padding:.65rem; min-height:2.6rem; }
+  h1 { font-size:1.2rem; margin:.4rem 0; } h2 { font-size:1.05rem; margin:.8rem 0 .3rem; }
+  .banner { padding:.45rem .75rem; font-size:.9rem; text-align:center; font-weight:600; }
+  .banner.test { background:#b3261e; color:#fff; } .banner.prod { background:var(--card); color:var(--mut); font-weight:400; }
+  .banner.warn { background:var(--warn); color:#fff; }
+  .bar { display:flex; justify-content:space-between; align-items:center; gap:.5rem; padding:.4rem 0; }
+  nav { position:fixed; bottom:0; left:0; right:0; display:flex; background:var(--card); border-top:1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
+  nav button { flex:1; border:0; border-radius:0; background:none; } nav button.on { color:var(--acc); font-weight:700; }
+  .chips { display:flex; gap:.4rem; overflow-x:auto; padding:.3rem 0; } .chips button { white-space:nowrap; } .chips button.on { background:var(--acc); color:#fff; }
+  .grid { display:grid; grid-template-columns:repeat(2, 1fr); gap:.5rem; }
+  .item { text-align:left; display:flex; flex-direction:column; gap:.15rem; } .item small { color:var(--mut); }
+  .row { display:flex; justify-content:space-between; gap:.5rem; align-items:center; padding:.35rem 0; border-bottom:1px solid var(--line); }
+  .row .qty { display:flex; align-items:center; gap:.4rem; } .row .qty button { min-height:2.2rem; padding:.2rem .7rem; }
+  .total { font-size:1.35rem; font-weight:700; display:flex; justify-content:space-between; padding:.5rem 0; }
+  .pay { display:grid; grid-template-columns:5rem 1fr auto; gap:.4rem; align-items:center; margin:.3rem 0; }
+  .msg { padding:.6rem; border-radius:.5rem; margin:.5rem 0; background:var(--card); } .msg.ok { color:var(--ok); } .msg.bad { color:var(--bad); } .msg.warn { color:var(--warn); }
+  pre.receipt { background:#fff; color:#000; padding:.6rem; border:1px solid var(--line); overflow-x:auto; font-size:.72rem; line-height:1.25; }
+  .muted { color:var(--mut); } .tag { font-size:.75rem; padding:.1rem .4rem; border-radius:.3rem; background:var(--bad); color:#fff; }
+  .hidden { display:none !important; } label { display:block; font-size:.85rem; color:var(--mut); margin:.5rem 0 .15rem; }
+  table { width:100%; border-collapse:collapse; font-size:.9rem; } td, th { padding:.3rem .2rem; border-bottom:1px solid var(--line); text-align:right; } td:first-child, th:first-child { text-align:left; }
+</style>
+</head>
+<body>
+<div id="banner" class="banner prod hidden"></div>
+<div id="offline" class="banner warn hidden">No connection. Billing is paused until it returns.</div>
+<main id="root"></main>
+<nav id="nav" class="hidden">
+  <button data-tab="bill">Bill</button><button data-tab="recent">Recent</button><button data-tab="admin" class="hidden">Day</button><button data-tab="settings">Settings</button>
+</nav>
+<script>
+(function () {
+"use strict";
+var POS = window.POS = {};
+var cfg = null, session = null, staff = null, shop = null, categories = [], menu = [];
+var state = { tab: "bill", cat: "all", cart: new Map(), busy: false, uncertain: false, taxLocked: false, receipt: null, recent: [], detail: null };
+var root = document.getElementById("root");
+
+/* ---------- small helpers: DOM is built with textContent only, never innerHTML ---------- */
+function h(tag, attrs, kids) {
+  var e = document.createElement(tag);
+  Object.keys(attrs || {}).forEach(function (k) {
+    var v = attrs[k];
+    if (k === "text") e.textContent = v; else if (k === "class") e.className = v;
+    else if (k.slice(0, 2) === "on") e.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) e.setAttribute(k, v === true ? "" : v);
+  });
+  (kids || []).forEach(function (c) { if (c != null) e.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+  return e;
+}
+function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+function $(id) { return document.getElementById(id); }
+
+/* ---------- money: integer paise everywhere, no floating point in any sum ---------- */
+var money = POS.money = {
+  fmt: function (p) { var neg = p < 0, a = Math.abs(p), r = Math.floor(a / 100), f = a % 100;
+    return (neg ? "-" : "") + "\u20B9" + String(r).replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "." + (f < 10 ? "0" : "") + f; },
+  plain: function (p) { var a = Math.abs(p), f = a % 100; return (p < 0 ? "-" : "") + String(Math.floor(a / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "." + (f < 10 ? "0" : "") + f; },
+  parse: function (s) { s = String(s == null ? "" : s).trim(); if (s === "") return 0; var m = /^(\d{1,7})(?:\.(\d{1,2}))?$/.exec(s); if (!m) return null;
+    return parseInt(m[1], 10) * 100 + (m[2] ? parseInt((m[2] + "0").slice(0, 2), 10) : 0); }
+};
+function istDate(d) { return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(d || new Date()); }
+function istTime(iso) { return new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(iso)); }
+function dayRange(date) { var start = new Date(date + "T00:00:00+05:30"); return [start.toISOString(), new Date(start.getTime() + 86400000).toISOString()]; }
+
+/* ---------- configuration: nothing secret is embedded; only the project URL and the PUBLIC (publishable) key ---------- */
+function decodeJwt(t) { try { return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))); } catch (e) { return null; } }
+POS.validateConfig = function (c) {
+  if (!c || typeof c !== "object") return "config.json is missing or not valid JSON";
+  if (c.env !== "test" && c.env !== "production") return 'config.env must be "test" or "production"';
+  var okUrl = /^https:\/\/[a-z0-9-]+\.supabase\.co$/.test(c.supabaseUrl || "") || (c.env === "test" && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(c.supabaseUrl || ""));
+  if (!okUrl) return "config.supabaseUrl must be https://<project>.supabase.co";
+  if (!c.supabaseKey || typeof c.supabaseKey !== "string") return "config.supabaseKey (the publishable key) is missing";
+  if (/^sb_secret_/.test(c.supabaseKey) || (decodeJwt(c.supabaseKey) || {}).role === "service_role")
+    return "REFUSED: this is a secret / service-role key. Use the publishable key. Never put a secret key in a web page.";
+  return null;
+};
+function projectRef() { return cfg.supabaseUrl.replace(/^https?:\/\//, "").split(".")[0].split(":")[0]; }
+
+/* ---------- API layer: Supabase Auth + PostgREST over fetch ---------- */
+function ApiError(status, code, message, network) { this.status = status; this.code = code; this.message = message; this.network = !!network; }
+ApiError.prototype = Object.create(Error.prototype);
+function timeoutFetch(url, opts, ms) {
+  var ctl = new AbortController(), t = setTimeout(function () { ctl.abort(); }, ms || 20000);
+  opts = Object.assign({}, opts, { signal: ctl.signal });
+  return fetch(url, opts).then(function (r) { clearTimeout(t); return r; }, function (e) { clearTimeout(t); throw new ApiError(0, "network", "No answer from the server (" + (e && e.name === "AbortError" ? "timed out" : "offline") + ")", true); });
+}
+function readJson(res) { return res.text().then(function (t) { if (!t) return null; try { return JSON.parse(t); } catch (e) { return t; } }); }
+var SKEY = function () { return "pos.session." + cfg.env; };
+function saveSession(s) { session = s; if (s) localStorage.setItem(SKEY(), JSON.stringify(s)); else localStorage.removeItem(SKEY()); }
+function authCall(path, body, token) {
+  var headers = { apikey: cfg.supabaseKey, "Content-Type": "application/json" }; if (token) headers.Authorization = "Bearer " + token;
+  return timeoutFetch(cfg.supabaseUrl + "/auth/v1/" + path, { method: "POST", headers: headers, body: JSON.stringify(body || {}) });
+}
+function toSession(d) { return { access_token: d.access_token, refresh_token: d.refresh_token, expires_at: Math.floor(Date.now() / 1000) + (d.expires_in || 3600), user_id: d.user && d.user.id, email: d.user && d.user.email }; }
+POS.signIn = function (email, password) {
+  return authCall("token?grant_type=password", { email: email, password: password }).then(function (res) { return readJson(res).then(function (d) {
+    if (!res.ok) throw new ApiError(res.status, (d && (d.error_code || d.error)) || "auth", (d && (d.msg || d.error_description || d.message)) || "Sign-in failed");
+    saveSession(toSession(d)); }); });
+};
+var refreshing = null;
+function refreshToken() {
+  if (!session || !session.refresh_token) return Promise.reject(new ApiError(401, "no_session", "Please sign in again"));
+  if (!refreshing) refreshing = authCall("token?grant_type=refresh_token", { refresh_token: session.refresh_token }).then(function (res) { return readJson(res).then(function (d) {
+    refreshing = null; if (!res.ok) { saveSession(null); staff = null; loginView(); var le = $("login-error"); if (le) { le.textContent = "Your session has ended. Please sign in again."; le.classList.remove("hidden"); } throw new ApiError(401, "refresh_failed", "Your session has ended. Please sign in again."); } saveSession(toSession(d)); }); }, function (e) { refreshing = null; throw e; });
+  return refreshing;
+}
+function ensureToken() { if (session && session.expires_at - Math.floor(Date.now() / 1000) < 60) return refreshToken(); return Promise.resolve(); }
+var api = POS.api = function (method, path, body, retried) {
+  return ensureToken().then(function () {
+    var headers = { apikey: cfg.supabaseKey, Authorization: "Bearer " + (session && session.access_token), "Content-Type": "application/json", Accept: "application/json" };
+    return timeoutFetch(cfg.supabaseUrl + "/rest/v1" + path, { method: method, headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store" });
+  }).then(function (res) {
+    if (res.status === 401 && !retried) return refreshToken().then(function () { return api(method, path, body, true); });
+    return readJson(res).then(function (d) {
+      if (!res.ok) throw new ApiError(res.status, d && d.code, (d && d.message) || ("Request failed (" + res.status + ")"));
+      return d; });
+  });
+};
+
+/* ---------- receipt text and ESC/POS bytes ---------- */
+function ascii(s) { return String(s == null ? "" : s).replace(/\u20B9/g, "Rs ").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\x20-\x7e]/g, "?"); }
+function wrap(text, w) { var out = [], words = ascii(text).split(" "), line = ""; words.forEach(function (x) { while (x.length > w) { if (line) { out.push(line); line = ""; } out.push(x.slice(0, w)); x = x.slice(w); }
+  if ((line + " " + x).trim().length > w) { out.push(line); line = x; } else line = (line + " " + x).trim(); }); if (line) out.push(line); return out; }
+function lr(l, r, w) { l = ascii(l); r = ascii(r); var gap = Math.max(1, w - l.length - r.length); return l + " ".repeat(gap) + r; }
+function pad(s, w, right) { s = String(s); return right ? " ".repeat(Math.max(0, w - s.length)) + s : s + " ".repeat(Math.max(0, w - s.length)); }
+POS.receiptLines = function (r, shopCfg, cols, duplicate) {
+  var L = [], C = cols || 48, rule = "-".repeat(C);
+  var add = function (t, o) { L.push(Object.assign({ t: t }, o || {})); };
+  add(ascii(shopCfg.shop_name || "Shop"), { center: true, bold: true, big: true });
+  [shopCfg.address, shopCfg.phone ? "Ph: " + shopCfg.phone : null].forEach(function (x) { if (x) wrap(x, C).forEach(function (l) { add(l, { center: true }); }); });
+  add(rule); add(lr("Bill No: " + r.bill_no, istTime(r.created_at), C));
+  add("Cashier: " + ascii(r.cashier)); if (r.customer_name) add("Customer: " + ascii(r.customer_name));
+  if (r.status === "voided") add("** VOIDED **", { center: true, bold: true });
+  if (duplicate) add("*** DUPLICATE COPY ***", { center: true, bold: true });
+  add(rule);
+  var nw = C - 4 - 9 - 11; add(pad("Item", nw) + pad("Qty", 4, true) + pad("Rate", 9, true) + pad("Amount", 11, true));
+  (r.items || []).forEach(function (i) { var parts = wrap(i.name, nw);
+    add(pad(parts[0], nw) + pad(i.qty, 4, true) + pad(money.plain(i.unit_price_paise), 9, true) + pad(money.plain(i.line_total_paise - (i.line_tax_paise || 0)), 11, true));
+    parts.slice(1).forEach(function (p) { add(p); }); });
+  add(rule);
+  if (r.tax_paise > 0) { add(lr("Subtotal", money.plain(r.subtotal_paise), C)); add(lr("Tax", money.plain(r.tax_paise), C)); }
+  add(lr("TOTAL", "Rs " + money.plain(r.total_paise), C), { bold: true, tall: true });
+  (r.payments || []).forEach(function (p) { add(lr(p.mode, money.plain(p.amount_paise), C)); });
+  add(rule);
+  if (shopCfg.footer_note) wrap(shopCfg.footer_note, C).forEach(function (l) { add(l, { center: true }); });
+  add("Thank you!", { center: true });
+  return L;
+};
+POS.escpos = function (lines, cols) {
+  var b = [0x1B, 0x40], C = cols || 48;
+  var push = function (a) { for (var i = 0; i < a.length; i++) b.push(a[i]); };
+  var enc = function (s) { var o = []; for (var i = 0; i < s.length; i++) o.push(s.charCodeAt(i) & 0x7f); return o; };
+  lines.forEach(function (l) {
+    push([0x1B, 0x61, l.center ? 1 : 0]); push([0x1B, 0x45, l.bold ? 1 : 0]); push([0x1D, 0x21, l.big ? 0x11 : (l.tall ? 0x01 : 0x00)]);
+    var t = l.t; if (l.big && t.length > Math.floor(C / 2)) t = t.slice(0, Math.floor(C / 2));
+    push(enc(t)); b.push(0x0A);
+  });
+  push([0x1B, 0x61, 0]); push([0x1B, 0x45, 0]); push([0x1D, 0x21, 0]); push([0x1B, 0x64, 4]); push([0x1D, 0x56, 0x42, 0x00]);
+  return b;
+};
+POS.receiptText = function (lines, cols) { return lines.map(function (l) { var t = l.t; if (l.center) { var pad = Math.max(0, Math.floor(((cols || 48) - t.length) / 2)); t = " ".repeat(pad) + t; } return t; }).join("\n"); };
+
+/* ---------- printing: WebUSB (preferred), RawBT app link, browser print dialog. A failed print never undoes a saved bill ---------- */
+var CHUNK = 1024;
+POS.nav = function (url) { window.location.href = url; };
+POS.print = {
+  usbSupported: function () { return typeof navigator !== "undefined" && "usb" in navigator; },
+  usb: function (bytes, interactive) {
+    if (!POS.print.usbSupported()) return Promise.reject(new Error("WebUSB is not available in this browser. Use Chrome on Android."));
+    var vendor = (cfg.printer && cfg.printer.vendorId) || 0x0483, dev;
+    return navigator.usb.getDevices().then(function (list) {
+      dev = list.filter(function (d) { return d.vendorId === vendor; })[0];
+      if (dev) return dev;
+      if (!interactive) throw new Error("No printer is paired with this page yet. Tap Print to choose it.");
+      return navigator.usb.requestDevice({ filters: [{ vendorId: vendor }] });
+    }).then(function (d) { dev = d; return dev.open(); }).then(function () { return dev.configuration === null ? dev.selectConfiguration(1) : null; }).then(function () {
+      var f = null; dev.configuration.interfaces.forEach(function (i) { i.alternates.forEach(function (a) { a.endpoints.forEach(function (e) { if (!f && e.direction === "out" && e.type === "bulk") f = { i: i.interfaceNumber, alt: a.alternateSetting, ep: e.endpointNumber }; }); }); });
+      if (!f) throw new Error("The device has no printable endpoint.");
+      return dev.claimInterface(f.i).then(function () { return f.alt ? dev.selectAlternateInterface(f.i, f.alt) : null; }).then(function () {
+        var data = new Uint8Array(bytes), sent = 0;
+        var step = function () { if (sent >= data.length) return Promise.resolve();
+          return dev.transferOut(f.ep, data.slice(sent, sent + CHUNK)).then(function (r) { if (r.status !== "ok") throw new Error("The printer refused the data (" + r.status + ")."); sent += r.bytesWritten; return step(); }); };
+        return step().then(function () { return dev.releaseInterface(f.i); }).then(function () { return dev.close(); }, function (e) { return Promise.resolve().then(function () { return dev.close(); }).catch(function () {}).then(function () { throw e; }); });
+      });
+    });
+  },
+  rawbtLink: function (bytes) { var s = ""; bytes.forEach(function (x) { s += String.fromCharCode(x); }); return "intent:base64," + btoa(s) + "#Intent;scheme=rawbt;package=ru.a402d.rawbtprinter;end;"; },
+  rawbt: function (bytes) { var link = POS.print.rawbtLink(bytes); POS.nav(link); return link; },
+  browser: function (text) {
+    var f = document.createElement("iframe"); f.setAttribute("style", "position:fixed;width:0;height:0;border:0"); document.body.appendChild(f);
+    var d = f.contentWindow.document; d.open(); d.write("<!doctype html><title>Receipt</title><pre style='font:12px/1.2 monospace;margin:0'></pre>"); d.close();
+    d.querySelector("pre").textContent = text; f.contentWindow.focus(); f.contentWindow.print(); setTimeout(function () { if (f.parentNode) f.parentNode.removeChild(f); }, 3000);
+  }
+};
+function cols() { return shop && shop.receipt_width === "58" ? 32 : ((cfg.printer && cfg.printer.columns) || 48); }
+function printerMode() { return localStorage.getItem("pos.printer.mode") || (cfg.printer && cfg.printer.mode) || "auto"; }
+function prep(receipt, duplicate) { var lines = POS.receiptLines(receipt, shop, cols(), duplicate); return { lines: lines, bytes: POS.escpos(lines, cols()), text: POS.receiptText(lines, cols()) }; }
+POS.printReceipt = function (receipt, opts) {
+  opts = opts || {}; var p = prep(receipt, !!opts.duplicate), mode = opts.mode || printerMode();
+  if (mode === "rawbt") { POS.print.rawbt(p.bytes); return Promise.resolve("Sent to the RawBT app. Check the printer."); }
+  if (mode === "browser") { POS.print.browser(p.text); return Promise.resolve("Opened the browser print dialog."); }
+  return POS.print.usb(p.bytes, !!opts.interactive).then(function () { return "Sent to the printer. If nothing came out, check paper and cable."; });
+};
+
+/* ---------- status line ---------- */
+function status(text, kind) { var s = $("status"); if (!s) return; s.className = "msg " + (kind || ""); s.textContent = text || ""; s.classList.toggle("hidden", !text); }
+function errText(e) { return e && e.message ? e.message : String(e); }
+
+/* ---------- views ---------- */
+function setBanner() {
+  var b = $("banner"); b.classList.remove("hidden", "test", "prod");
+  if (cfg.env === "test") { b.classList.add("test"); b.textContent = "TEST ENVIRONMENT (" + projectRef() + "): no real sales"; } else { b.classList.add("prod"); b.textContent = projectRef(); }
+}
+function fatal(msg) { clear(root); root.appendChild(h("div", { class: "msg bad", id: "fatal", text: msg })); $("nav").classList.add("hidden"); }
+function loginView() {
+  $("nav").classList.add("hidden"); clear(root);
+  var err = h("div", { class: "msg bad hidden", id: "login-error" });
+  var em = h("input", { id: "email", type: "email", autocomplete: "username", inputmode: "email" }), pw = h("input", { id: "password", type: "password", autocomplete: "current-password" });
+  var btn = h("button", { id: "login-btn", class: "primary", text: "Sign in", onclick: function () {
+    btn.disabled = true; err.classList.add("hidden");
+    POS.signIn(em.value.trim(), pw.value).then(afterLogin).catch(function (e) { err.textContent = e.network ? errText(e) : "Sign-in failed. Check the email and password."; err.classList.remove("hidden"); }).then(function () { btn.disabled = false; pw.value = ""; });
+  } });
+  root.appendChild(h("div", {}, [h("h1", { text: "Sign in" }), err, h("label", { text: "Email" }), em, h("label", { text: "Password" }), pw, h("p"), btn]));
+}
+function afterLogin() {
+  clear(root); root.appendChild(h("p", { class: "muted", text: "Loading..." }));
+  return Promise.all([api("GET", "/staff_users?select=id,name,role,active&limit=1"), api("GET", "/shop_config?select=shop_name,address,phone,footer_note,tax_enabled,receipt_width&limit=1")]).then(function (r) {
+    if (!r[0] || !r[0].length || r[0][0].active !== true) { saveSession(null); throw new ApiError(403, "not_staff", "This login is not an active staff member."); }
+    staff = r[0][0]; shop = r[1][0] || {}; state.taxLocked = !!shop.tax_enabled; return loadMenu();
+  }).then(function () { buildNav(); show("bill"); }).catch(function (e) { loginView(); var x = $("login-error"); if (x) { x.textContent = errText(e); x.classList.remove("hidden"); } });
+}
+function loadMenu() {
+  return Promise.all([api("GET", "/categories?select=id,name&archived_at=is.null&order=name"), api("GET", "/menu_items?select=id,name,price_paise,category_id,gst_percent&active=is.true&order=name")])
+    .then(function (r) { categories = r[0] || []; menu = r[1] || []; });
+}
+function buildNav() {
+  var nav = $("nav"); nav.classList.remove("hidden");
+  nav.querySelector('[data-tab="admin"]').classList.toggle("hidden", staff.role !== "admin");
+  Array.prototype.forEach.call(nav.querySelectorAll("button"), function (b) { b.onclick = function () { show(b.getAttribute("data-tab")); }; });
+}
+function show(tab) {
+  state.tab = tab; Array.prototype.forEach.call($("nav").querySelectorAll("button"), function (b) { b.classList.toggle("on", b.getAttribute("data-tab") === tab); });
+  clear(root); root.appendChild(h("div", { id: "status", class: "msg hidden" }));
+  ({ bill: billView, recent: recentView, admin: adminView, settings: settingsView })[tab]();
+}
+function header(title) { return h("div", { class: "bar" }, [h("h1", { text: title }), h("span", { class: "muted", id: "who", text: staff.name + " (" + staff.role + ")" })]); }
+
+/* --- billing --- */
+function cartLines() { var out = []; state.cart.forEach(function (q, id) { var m = menu.filter(function (x) { return x.id === id; })[0]; if (m) out.push({ m: m, q: q }); }); return out; }
+function cartTotal() { return cartLines().reduce(function (s, l) { return s + l.m.price_paise * l.q; }, 0); }
+function billView() {
+  root.appendChild(header("New bill"));
+  if (state.taxLocked) { root.appendChild(h("div", { class: "msg bad", id: "tax-lock", text: "Tax is switched on in the database. This version bills with tax OFF only, so billing is disabled." })); return; }
+  if (state.receipt) { return receiptView(); }
+  if (state.uncertain) root.appendChild(h("div", { class: "msg warn", id: "uncertain", text: "The last bill may or may not have been saved (no answer from the server). Open Recent and check before billing again." }));
+  var chips = h("div", { class: "chips" }, [h("button", { class: state.cat === "all" ? "on" : "", "data-cat": "all", text: "All", onclick: function () { state.cat = "all"; show("bill"); } })]);
+  categories.forEach(function (c) { chips.appendChild(h("button", { class: state.cat === c.id ? "on" : "", "data-cat": c.id, text: c.name, onclick: function () { state.cat = c.id; show("bill"); } })); });
+  root.appendChild(chips);
+  var grid = h("div", { class: "grid", id: "menu" });
+  menu.filter(function (m) { return state.cat === "all" || m.category_id === state.cat; }).forEach(function (m) {
+    grid.appendChild(h("button", { class: "item", "data-id": m.id, onclick: function () { var q = (state.cart.get(m.id) || 0) + 1; if (q <= 99) state.cart.set(m.id, q); show("bill"); } }, [h("span", { text: m.name }), h("small", { text: money.fmt(m.price_paise) })]));
+  });
+  if (!menu.length) grid.appendChild(h("p", { class: "muted", text: "The menu is empty. An admin must add items first." }));
+  root.appendChild(grid);
+  root.appendChild(h("h2", { text: "Cart" }));
+  var cart = h("div", { id: "cart" });
+  cartLines().forEach(function (l) {
+    cart.appendChild(h("div", { class: "row", "data-id": l.m.id }, [h("span", { text: l.m.name }), h("span", { class: "qty" }, [
+      h("button", { "data-act": "dec", text: "-", onclick: function () { var q = l.q - 1; if (q < 1) state.cart.delete(l.m.id); else state.cart.set(l.m.id, q); show("bill"); } }),
+      h("span", { class: "q", text: String(l.q) }),
+      h("button", { "data-act": "inc", text: "+", onclick: function () { if (l.q < 99) state.cart.set(l.m.id, l.q + 1); show("bill"); } }),
+      h("span", { text: money.fmt(l.m.price_paise * l.q) })])]));
+  });
+  root.appendChild(cart);
+  var total = cartTotal();
+  root.appendChild(h("div", { class: "total" }, [h("span", { text: "Total" }), h("span", { id: "cart-total", "data-paise": String(total), text: money.fmt(total) })]));
+  var cust = h("input", { id: "customer", placeholder: "Customer name (optional)", maxlength: "80", value: state.customer || "", oninput: function (e) { state.customer = e.target.value; } });
+  root.appendChild(cust);
+  root.appendChild(h("h2", { text: "Payment" }));
+  var inputs = {}, rem = h("div", { id: "pay-remaining", class: "muted" });
+  var saveBtn = h("button", { id: "save-bill", class: "primary", text: "Save bill" });
+  var refresh = function () {
+    var vals = {}, bad = false, sum = 0;
+    ["Cash", "UPI", "Card"].forEach(function (m) { var v = money.parse(inputs[m].value); if (v === null) bad = true; else { vals[m] = v; sum += v; } });
+    var left = total - sum; rem.textContent = bad ? "Enter amounts like 80 or 80.50" : (left === 0 && total > 0 ? "Ready" : (left > 0 ? "Remaining " + money.fmt(left) : "Overpaid by " + money.fmt(-left)));
+    rem.setAttribute("data-left", bad ? "invalid" : String(left)); state.pay = vals;
+    saveBtn.disabled = bad || left !== 0 || total <= 0 || state.busy || state.uncertain || !navigator.onLine;
+  };
+  ["Cash", "UPI", "Card"].forEach(function (m) {
+    inputs[m] = h("input", { id: "pay-" + m.toLowerCase(), inputmode: "decimal", placeholder: "0", value: (state.payText || {})[m] || "", oninput: function () { state.payText = state.payText || {}; state.payText[m] = inputs[m].value; refresh(); } });
+    root.appendChild(h("div", { class: "pay" }, [h("span", { text: m }), inputs[m], h("button", { "data-fill": m, text: "= Total", onclick: function () {
+      ["Cash", "UPI", "Card"].forEach(function (x) { inputs[x].value = x === m ? money.plain(total).replace(/,/g, "") : ""; }); state.payText = {}; ["Cash", "UPI", "Card"].forEach(function (x) { state.payText[x] = inputs[x].value; }); refresh(); } })]));
+  });
+  root.appendChild(rem); saveBtn.onclick = saveBill; root.appendChild(saveBtn);
+  root.appendChild(h("button", { id: "clear-cart", text: "Clear", onclick: function () { state.cart.clear(); state.payText = {}; state.customer = ""; show("bill"); } }));
+  refresh();
+}
+function saveBill() {
+  if (state.busy) return; state.busy = true; $("save-bill").disabled = true; status("Saving...", "");
+  var items = []; state.cart.forEach(function (q, id) { items.push({ menu_item_id: id, qty: q }); });
+  var pays = ["Cash", "UPI", "Card"].filter(function (m) { return state.pay[m] > 0; }).map(function (m) { return { mode: m, amount_paise: state.pay[m] }; });
+  var expected = cartTotal();
+  api("POST", "/rpc/create_bill", { p_customer: (state.customer || "").trim() || null, p_items: items, p_payments: pays, p_device: deviceId() }).then(function (r) {
+    state.busy = false; state.cart.clear(); state.payText = {}; state.customer = ""; state.receipt = r; state.receiptNote = r.total_paise !== expected ? "The saved total (" + money.fmt(r.total_paise) + ") differs from what the screen showed. The saved bill is correct." : "";
+    show("bill"); autoPrint(r);
+  }).catch(function (e) {
+    state.busy = false;
+    if (e.network || e.status >= 500) { state.uncertain = true; show("bill"); status("No answer from the server. The bill may have been saved. Open Recent and check before billing again.", "warn"); return; }
+    loadMenu().then(function () { show("bill"); status((e.status === 403 ? "Not allowed: " : "Not saved: ") + errText(e) + " The menu was reloaded; check the cart and payments.", "bad"); }, function () { show("bill"); status("Not saved: " + errText(e), "bad"); });
+  });
+}
+function deviceId() { var d = (cfg.deviceName || "").trim() || localStorage.getItem("pos.device"); if (!d) { d = "phone-" + Math.random().toString(36).slice(2, 8); localStorage.setItem("pos.device", d); } return d; }
+function autoPrint(r) {
+  if (printerMode() === "none") return;
+  var mode = printerMode(); if (mode === "rawbt" || mode === "browser") { status("Bill saved. Tap Print to print it.", "ok"); return; }
+  POS.printReceipt(r, { interactive: false }).then(function (m) { status("Bill #" + r.bill_no + " saved. " + m, "ok"); }, function (e) { status("Bill #" + r.bill_no + " is SAVED. Printing failed: " + errText(e) + " Use a Print button below.", "warn"); });
+}
+function receiptView() {
+  var r = state.receipt, p = prep(r, false);
+  root.appendChild(h("div", { class: "msg ok", id: "receipt-no", "data-bill-no": String(r.bill_no), text: "Bill #" + r.bill_no + " saved: " + money.fmt(r.total_paise) }));
+  if (state.receiptNote) root.appendChild(h("div", { class: "msg warn", text: state.receiptNote }));
+  root.appendChild(h("pre", { class: "receipt", id: "receipt-text", text: p.text }));
+  var go = function (mode, label, id) { return h("button", { id: id, text: label, onclick: function () { status("Printing...", ""); POS.printReceipt(r, { mode: mode, interactive: true }).then(function (m) { status(m, "ok"); }, function (e) { status("Print failed: " + errText(e), "bad"); }); } }); };
+  root.appendChild(h("div", { class: "grid" }, [go("webusb", "Print (USB)", "print-btn"), go("rawbt", "Print with RawBT", "rawbt-btn"), go("browser", "Browser print", "browser-print-btn")]));
+  root.appendChild(h("button", { id: "new-bill", class: "primary", text: "New bill", onclick: function () { state.receipt = null; show("bill"); } }));
+}
+
+/* --- recent bills, reprint, void, refund --- */
+var BILL_SELECT = "id,bill_no,created_at,customer_name,subtotal_paise,tax_paise,total_paise,status,void_reason,staff_users(name),bill_items(item_name_snapshot,category_name_snapshot,qty,unit_price_paise,gst_percent_snapshot,line_tax_paise,line_total_paise),bill_payments(mode,amount_paise)";
+function toReceipt(b) {
+  return { bill_id: b.id, bill_no: b.bill_no, created_at: b.created_at, customer_name: b.customer_name, cashier: b.staff_users && b.staff_users.name, status: b.status,
+    subtotal_paise: b.subtotal_paise, tax_paise: b.tax_paise, total_paise: b.total_paise,
+    items: (b.bill_items || []).map(function (i) { return { name: i.item_name_snapshot, category: i.category_name_snapshot, qty: i.qty, unit_price_paise: i.unit_price_paise, gst_percent: i.gst_percent_snapshot, line_tax_paise: i.line_tax_paise, line_total_paise: i.line_total_paise }; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; }),
+    payments: (b.bill_payments || []).map(function (p) { return { mode: p.mode, amount_paise: p.amount_paise }; }).sort(function (a, b) { return a.mode < b.mode ? -1 : 1; }) };
+}
+function recentView() {
+  root.appendChild(header("Recent bills"));
+  if (state.uncertain) {
+    root.appendChild(h("div", { class: "msg warn", id: "uncertain-help", text: "Check the list. If the last bill is there, it was saved. Then choose:" }));
+    root.appendChild(h("button", { id: "was-saved", text: "It was saved: clear the cart", onclick: function () { state.uncertain = false; state.cart.clear(); state.payText = {}; show("recent"); } }));
+    root.appendChild(h("button", { id: "not-saved", text: "Nothing was saved: continue billing", onclick: function () { state.uncertain = false; show("bill"); } }));
+  }
+  var list = h("div", { id: "recent-list" }); root.appendChild(list); root.appendChild(h("div", { id: "detail" }));
+  api("GET", "/bills?select=" + BILL_SELECT + "&order=bill_no.desc&limit=30").then(function (rows) {
+    state.recent = rows; clear(list);
+    if (!rows.length) list.appendChild(h("p", { class: "muted", text: "No bills yet." }));
+    rows.forEach(function (b) { list.appendChild(h("button", { class: "row bill-row", "data-no": String(b.bill_no), style: "width:100%", onclick: function () { detailView(b); } }, [
+      h("span", { text: "#" + b.bill_no + "  " + istTime(b.created_at) }), h("span", {}, [b.status === "voided" ? h("span", { class: "tag", text: "VOID " }) : null, money.fmt(b.total_paise)])])); });
+  }).catch(function (e) { status("Could not load bills: " + errText(e), "bad"); });
+}
+function detailView(b) {
+  var d = $("detail"); clear(d); state.detail = b;
+  d.appendChild(h("h2", { text: "Bill #" + b.bill_no + (b.status === "voided" ? " (VOIDED: " + b.void_reason + ")" : "") }));
+  d.appendChild(h("pre", { class: "receipt", id: "detail-text", text: prep(toReceipt(b), false).text }));
+  d.appendChild(h("button", { id: "reprint", text: "Reprint (duplicate copy)", onclick: function () { status("Printing...", ""); POS.printReceipt(toReceipt(b), { duplicate: true, interactive: true }).then(function (m) { status(m, "ok"); }, function (e) { status("Print failed: " + errText(e), "bad"); }); } }));
+  var refunds = h("div", { id: "refunds" }); d.appendChild(refunds);
+  api("GET", "/refunds?select=amount_paise,reason,created_at,refund_payments(mode,amount_paise)&original_bill_id=eq." + b.id + "&order=created_at").then(function (rs) {
+    rs.forEach(function (r) { refunds.appendChild(h("div", { class: "msg", text: "Refunded " + money.fmt(r.amount_paise) + " (" + r.refund_payments.map(function (p) { return p.mode + " " + money.plain(p.amount_paise); }).join(", ") + "): " + r.reason })); }); }).catch(function () {});
+  if (staff.role === "admin" && b.status === "completed") {
+    d.appendChild(h("button", { id: "void-btn", class: "danger", text: "Void this bill", onclick: function () {
+      var reason = POS.ask("Reason for voiding bill #" + b.bill_no + " (at least 3 characters)"); if (reason == null) return; reason = reason.trim();
+      if (reason.length < 3) { status("A reason is required.", "bad"); return; }
+      if (!POS.confirm("Void bill #" + b.bill_no + " for " + money.fmt(b.total_paise) + "? This cannot be undone.")) return;
+      api("POST", "/rpc/void_bill", { p_bill_id: b.id, p_reason: reason }).then(function () { show("recent"); status("Bill #" + b.bill_no + " voided.", "ok"); }, function (e) { status("Not voided: " + errText(e), "bad"); });
+    } }));
+    var ins = {}, reason = h("input", { id: "refund-reason", placeholder: "Refund reason" });
+    var form = h("div", {}, [h("h2", { text: "Refund" })]);
+    ["Cash", "UPI", "Card"].forEach(function (m) { ins[m] = h("input", { id: "refund-" + m.toLowerCase(), inputmode: "decimal", placeholder: m + " refunded" }); form.appendChild(ins[m]); });
+    form.appendChild(reason);
+    form.appendChild(h("button", { id: "refund-btn", class: "danger", text: "Refund", onclick: function () {
+      var pays = [], bad = false; ["Cash", "UPI", "Card"].forEach(function (m) { var v = money.parse(ins[m].value); if (v === null) bad = true; else if (v > 0) pays.push({ mode: m, amount_paise: v }); });
+      if (bad || !pays.length) { status("Enter the amount to refund, e.g. 30 or 30.50.", "bad"); return; }
+      if (reason.value.trim().length < 3) { status("A reason is required.", "bad"); return; }
+      var sum = pays.reduce(function (s, p) { return s + p.amount_paise; }, 0);
+      if (!POS.confirm("Refund " + money.fmt(sum) + " on bill #" + b.bill_no + "?")) return;
+      api("POST", "/rpc/refund_bill", { p_original_bill_id: b.id, p_reason: reason.value.trim(), p_payments: pays }).then(function () { status("Refunded " + money.fmt(sum) + ".", "ok"); detailView(b); }, function (e) { status("Not refunded: " + errText(e), "bad"); });
+    } }));
+    d.appendChild(form);
+  }
+}
+POS.confirm = function (q) { return window.confirm(q); };
+POS.ask = function (q) { return window.prompt(q); };
+
+/* --- admin: day totals and closing (figures come from the database; the screen only displays them) --- */
+function adminView() {
+  root.appendChild(header("Day report"));
+  var date = h("input", { id: "day-date", type: "date", value: istDate() });
+  var out = h("div", { id: "day-summary" });
+  root.appendChild(h("label", { text: "Business day (India)" })); root.appendChild(date);
+  root.appendChild(h("button", { id: "day-load", class: "primary", text: "Load", onclick: function () { loadDay(date.value, out); } }));
+  root.appendChild(out); loadDay(date.value, out);
+}
+function loadDay(date, out) {
+  var r = dayRange(date);
+  Promise.all([api("POST", "/rpc/daily_payment_totals", { p_date: date }), api("GET", "/bills?select=status,total_paise&created_at=gte." + encodeURIComponent(r[0]) + "&created_at=lt." + encodeURIComponent(r[1])),
+               api("GET", "/daily_closings?select=expected_cash_paise,counted_cash_paise,cash_variance_paise,upi_total_paise,card_total_paise,notes&business_date=eq." + date)]).then(function (x) {
+    var t = x[0][0] || {}, bills = x[1], closed = x[2][0]; clear(out);
+    var tbl = h("table", { id: "day-table" }, [h("tr", {}, ["", "Collected", "Refunded", "Net"].map(function (c) { return h("th", { text: c }); }))]);
+    [["Cash", "cash"], ["UPI", "upi"], ["Card", "card"]].forEach(function (m) { var c = t[m[1] + "_paise"] || 0, f = t[m[1] + "_refunded_paise"] || 0;
+      tbl.appendChild(h("tr", { "data-mode": m[0] }, [h("td", { text: m[0] }), h("td", { text: money.fmt(c) }), h("td", { text: money.fmt(f) }), h("td", { class: "net", text: money.fmt(c - f) })])); });
+    out.appendChild(tbl);
+    out.appendChild(h("p", { id: "day-counts", class: "muted", text: bills.filter(function (b) { return b.status === "completed"; }).length + " bills, " + bills.filter(function (b) { return b.status === "voided"; }).length + " voided" }));
+    if (closed) { out.appendChild(h("div", { class: "msg ok", id: "closed-info", text: "Closed. Expected cash " + money.fmt(closed.expected_cash_paise) + ", counted " + money.fmt(closed.counted_cash_paise) + ", difference " + money.fmt(closed.cash_variance_paise) + "." })); return; }
+    var counted = h("input", { id: "counted-cash", inputmode: "decimal", placeholder: "Cash counted in the drawer" }), notes = h("input", { id: "close-notes", placeholder: "Notes (optional)" });
+    out.appendChild(h("h2", { text: "Close this day" })); out.appendChild(counted); out.appendChild(notes);
+    out.appendChild(h("button", { id: "close-day", class: "danger", text: "Close day", onclick: function () {
+      var v = money.parse(counted.value); if (v === null || counted.value.trim() === "") { status("Enter the cash counted, e.g. 4250.", "bad"); return; }
+      if (!POS.confirm("Close " + date + " with " + money.fmt(v) + " counted? The expected figures are calculated by the database and a closed day cannot be edited.")) return;
+      api("POST", "/rpc/close_day", { p_business_date: date, p_counted_cash_paise: v, p_notes: notes.value.trim() || null }).then(function () { status("Day closed.", "ok"); loadDay(date, out); }, function (e) { status("Not closed: " + errText(e), "bad"); });
+    } }));
+  }).catch(function (e) { status("Could not load the day: " + errText(e), "bad"); });
+}
+
+/* --- settings --- */
+function settingsView() {
+  root.appendChild(header("Settings"));
+  root.appendChild(h("p", { class: "muted", id: "env-info", text: "Environment: " + cfg.env + " | project " + projectRef() + " | device " + deviceId() }));
+  var sel = h("select", { id: "printer-mode", onchange: function (e) { localStorage.setItem("pos.printer.mode", e.target.value); } }, [["auto", "Auto: USB, then buttons"], ["webusb", "USB only"], ["rawbt", "RawBT app"], ["browser", "Browser print"], ["none", "No auto print"]].map(function (o) { return h("option", { value: o[0], text: o[1] }); }));
+  sel.value = printerMode(); root.appendChild(h("label", { text: "Printing" })); root.appendChild(sel);
+  var test = { id: "x" };
+  var mk = function (id, label, mode, interactive) { return h("button", { id: id, text: label, onclick: function () {
+    var r = { bill_no: 0, created_at: new Date().toISOString(), cashier: staff.name, customer_name: null, subtotal_paise: 1000, tax_paise: 0, total_paise: 1000, items: [{ name: "PRINTER TEST", qty: 1, unit_price_paise: 1000, line_total_paise: 1000, line_tax_paise: 0 }], payments: [{ mode: "Cash", amount_paise: 1000 }] };
+    status("Printing...", ""); POS.printReceipt(r, { mode: mode, interactive: interactive }).then(function (m) { status(m, "ok"); }, function (e) { status("Print failed: " + errText(e), "bad"); }); } }); };
+  root.appendChild(h("div", { class: "grid" }, [mk("pair-printer", "Pair printer and test (USB)", "webusb", true), mk("test-rawbt", "Test via RawBT", "rawbt", true), mk("test-browser", "Test via browser print", "browser", true)]));
+  root.appendChild(h("h2", { text: "Session" }));
+  root.appendChild(h("button", { id: "logout", class: "danger", text: "Sign out", onclick: function () {
+    var tok = session && session.access_token; saveSession(null); staff = null; state.cart.clear(); state.receipt = null; state.uncertain = false;
+    if (tok) authCall("logout", {}, tok).catch(function () {}); loginView(); } }));
+}
+
+/* ---------- start ---------- */
+window.addEventListener("online", function () { $("offline").classList.add("hidden"); if (staff) show(state.tab); });
+window.addEventListener("offline", function () { $("offline").classList.remove("hidden"); });
+POS.start = function () {
+  var getCfg = window.POS_CONFIG ? Promise.resolve(window.POS_CONFIG) : fetch("config.json", { cache: "no-store" }).then(function (r) { return r.json(); });
+  return getCfg.then(function (c) { var bad = POS.validateConfig(c); if (bad) { fatal(bad); return; } cfg = c; setBanner();
+    try { session = JSON.parse(localStorage.getItem(SKEY()) || "null"); } catch (e) { session = null; }
+    if (!navigator.onLine) $("offline").classList.remove("hidden");
+    if (session && session.access_token) return afterLogin(); loginView(); }).catch(function (e) { fatal("Could not start: " + errText(e)); });
+};
+POS._state = function () { return { cfg: cfg, session: session, staff: staff, shop: shop, menu: menu, state: state }; };
+POS.start();
+})();
+</script>
+</body>
+</html>
