@@ -1,0 +1,7 @@
+{
+  "env": "test",
+  "supabaseUrl": "https://ksqjbnuhkeufboxrvwbr.supabase.co",
+  "supabaseKey": "sb_publishable_gwJ6CiCWXmcsEs0bKBVvkw_m2fmlBCs",
+  "deviceName": "test-phone",
+  "printer": { "vendorId": 1155, "columns": 48, "mode": "auto" }
+}
