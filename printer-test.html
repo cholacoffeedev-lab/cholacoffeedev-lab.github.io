@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Printer test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 1rem auto; padding: 0 1rem; line-height: 1.5; color: #1a1a1a; background: #fff; }
+  button { display: block; width: 100%; margin: .5rem 0; padding: .9rem; font-size: 1.05rem; border-radius: .5rem; border: 1px solid #888; background: #eef; }
+  button.sec { background: #f4f4f4; font-size: .95rem; padding: .6rem; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #111; color: #9f9; padding: .75rem; border-radius: .5rem; min-height: 8rem; font-size: .85rem; }
+  .note { font-size: .9rem; color: #555; }
+  @media (prefers-color-scheme: dark) { body { color: #e8e8e8; background: #161616; } button { background: #2a2a40; color: #eee; } button.sec { background: #262626; } .note { color: #aaa; } }
+</style>
+</head>
+<body>
+<h1>Printer test</h1>
+<p class="note">For a USB receipt printer (80 mm, ESC/POS) attached to an Android phone with an OTG adapter. This page only sends printer commands to the device you pick. It collects, stores and sends nothing anywhere.</p>
+<ol class="note">
+  <li>Open this page in <b>Chrome on Android</b>, not inside another app.</li>
+  <li>Switch the printer on, load paper, and connect it with the OTG adapter and a data cable.</li>
+  <li>Tap button 1. Choose the printer in the list and allow access.</li>
+  <li>If anything fails, <b>screenshot the green log below</b> and send it.</li>
+</ol>
+<button id="b-short">1. Short test (WebUSB)</button>
+<button id="b-full">2. Full test with width ruler (WebUSB)</button>
+<button id="b-saved">4. Short test WITHOUT the chooser (printer already allowed)</button>
+<button id="b-rawbt" class="sec">3. Short test through the RawBT app</button>
+<button id="b-any" class="sec">Short test, show ALL USB devices in the chooser</button>
+<button id="b-list" class="sec">List USB devices this page may already use</button>
+<pre id="log">Log appears here.</pre>
+<script>
+"use strict";
+var VENDOR = 0x0483;          // STMicroelectronics: the vendor id RawBT reported for this printer (usb_1155_22304)
+var CHUNK = 1024;
+var logEl = document.getElementById("log");
+var firstLog = true;
+function log(msg) {
+  if (firstLog) { logEl.textContent = ""; firstLog = false; }
+  logEl.textContent += msg + "\n";
+}
+function hex(n) { return "0x" + ("0000" + n.toString(16)).slice(-4); }
+function text(s) { return Array.from(new TextEncoder().encode(s)); }
+
+var INIT = [0x1B, 0x40], CENTER = [0x1B, 0x61, 0x01], LEFT = [0x1B, 0x61, 0x00], BOLD_ON = [0x1B, 0x45, 0x01], BOLD_OFF = [0x1B, 0x45, 0x00];
+function feed(n) { return [0x1B, 0x64, n]; }
+var CUT = [0x1D, 0x56, 0x42, 0x00];     // feed to the cutter and make a partial cut
+
+function shortTest() {
+  return INIT.concat(CENTER, BOLD_ON, text("PRINTER TEST OK\n"), BOLD_OFF, LEFT, feed(4), CUT);
+}
+function row(left, right) {       // one 48-column line: text on the left, amount on the right
+  var pad = 48 - left.length - right.length;
+  return text(left + " ".repeat(Math.max(1, pad)) + right + "\n");
+}
+function fullTest() {
+  var ruler = "123456789012345678901234567890123456789012345678";     // 48 characters: the width of an 80 mm printer in font A
+  var eq = "=".repeat(48), dash = "-".repeat(48);
+  return INIT.concat(
+    CENTER, BOLD_ON, text("PRINTER TEST\n"), BOLD_OFF,
+    text(ruler + "\n"), LEFT,
+    text("Left aligned line\n"), text(eq + "\n"),
+    row("Filter Coffee x2", "Rs 100.00"), row("Tea x1", "Rs 30.00"),
+    text(dash + "\n"), BOLD_ON, row("TOTAL", "Rs 130.00"), BOLD_OFF,
+    row("Cash", "Rs 100.00"), row("UPI", "Rs 30.00"), CENTER, text("If the ruler line fits on one row,\nthe 576-dot width is right.\n"), LEFT, feed(4), CUT);
+}
+
+function describe(dev) {
+  log("device: vendor " + hex(dev.vendorId) + " product " + hex(dev.productId) + " name: " + (dev.productName || "(none)") + ", maker: " + (dev.manufacturerName || "(none)") + ", serial: " + (dev.serialNumber || "(NONE: Chrome may forget this device when it reconnects)"));
+}
+function findBulkOut(dev) {
+  var found = null;
+  dev.configuration.interfaces.forEach(function (iface) {
+    iface.alternates.forEach(function (alt) {
+      var eps = alt.endpoints.map(function (e) { return e.endpointNumber + ":" + e.type + ":" + e.direction; }).join(" ");
+      log("interface " + iface.interfaceNumber + " alt " + alt.alternateSetting + " class " + alt.interfaceClass + " endpoints [" + eps + "]");
+      alt.endpoints.forEach(function (ep) {
+        if (!found && ep.direction === "out" && ep.type === "bulk") found = { iface: iface.interfaceNumber, alt: alt.alternateSetting, ep: ep.endpointNumber };
+      });
+    });
+  });
+  return found;
+}
+
+async function printWebUsb(bytes, anyDevice) {
+  log("page is a secure context: " + window.isSecureContext + " | top-level page: " + (window.top === window) + " | WebUSB present: " + ("usb" in navigator));
+  if (!("usb" in navigator)) { log("STOP: WebUSB is not available here. Use Chrome on Android and open this page directly (not inside another app)."); return; }
+  var dev;
+  try {
+    dev = await navigator.usb.requestDevice({ filters: anyDevice ? [] : [{ vendorId: VENDOR }] });
+  } catch (e) { log("STOP at the device chooser: " + e.name + ": " + e.message); return; }
+  await sendTo(dev, bytes);
+}
+
+async function printSaved(bytes) {
+  if (!("usb" in navigator)) { log("STOP: WebUSB is not available here."); return; }
+  var list = await navigator.usb.getDevices();
+  var dev = list.filter(function (d) { return d.vendorId === VENDOR; })[0];
+  if (!dev) { log("No printer is saved for this page (" + list.length + " device(s) allowed by Chrome: " + list.map(function (d) { return hex(d.vendorId) + ":" + hex(d.productId); }).join(", ") + "). Chrome has forgotten it. Use button 1 to choose it again."); return; }
+  log("allowed devices found: " + list.length + " (" + list.map(function (d) { return hex(d.vendorId) + ":" + hex(d.productId); }).join(", ") + ")");
+  log("using the printer this page was already allowed to use: no chooser");
+  await sendTo(dev, bytes);
+}
+
+async function sendTo(dev, bytes) {
+  describe(dev);
+  try {
+    await dev.open(); log("opened");
+    if (dev.configuration === null) { await dev.selectConfiguration(1); log("configuration 1 selected"); }
+    var f = findBulkOut(dev);
+    if (!f) { log("STOP: no bulk OUT endpoint found on this device"); await dev.close(); return; }
+    await dev.claimInterface(f.iface); log("interface " + f.iface + " claimed");
+    if (f.alt) { await dev.selectAlternateInterface(f.iface, f.alt); }
+    var data = new Uint8Array(bytes), sent = 0, ok = true;
+    log("sending " + data.length + " bytes in chunks of " + CHUNK + " to endpoint " + f.ep);
+    while (sent < data.length) {
+      var res = await dev.transferOut(f.ep, data.slice(sent, sent + CHUNK));
+      log("chunk: status " + res.status + ", " + res.bytesWritten + " bytes");
+      if (res.status !== "ok") { ok = false; log("STOP: the printer did not accept the data (status " + res.status + ")"); break; }
+      sent += res.bytesWritten;
+      log("total " + sent + "/" + data.length);
+    }
+    await dev.releaseInterface(f.iface); await dev.close();
+    log(ok && sent === data.length ? "DONE: all bytes were SENT. This page cannot see paper: check whether it printed." : "FAILED: only " + sent + " of " + data.length + " bytes were accepted by the printer. Nothing reliable was printed.");
+  } catch (e) {
+    log("FAILED: " + e.name + ": " + e.message);
+    try { await dev.close(); } catch (e2) { /* already closed */ }
+  }
+}
+
+function printRawBt(bytes) {
+  var bin = ""; bytes.forEach(function (b) { bin += String.fromCharCode(b); });
+  var link = "intent:base64," + btoa(bin) + "#Intent;scheme=rawbt;package=ru.a402d.rawbtprinter;end;";
+  log("opening the RawBT app with " + bytes.length + " bytes. RawBT shows its own result; this page cannot tell if paper came out.");
+  window.location.href = link;
+  return link;
+}
+
+async function listDevices() {
+  if (!("usb" in navigator)) { log("WebUSB is not available here."); return; }
+  var list = await navigator.usb.getDevices();
+  log(list.length + " device(s) already allowed for this page");
+  list.forEach(describe);
+}
+
+document.getElementById("b-short").addEventListener("click", function () { printWebUsb(shortTest(), false); });
+document.getElementById("b-full").addEventListener("click", function () { printWebUsb(fullTest(), false); });
+document.getElementById("b-any").addEventListener("click", function () { printWebUsb(shortTest(), true); });
+document.getElementById("b-saved").addEventListener("click", function () { printSaved(shortTest()); });
+document.getElementById("b-rawbt").addEventListener("click", function () { printRawBt(shortTest()); });
+document.getElementById("b-list").addEventListener("click", function () { listDevices(); });
+</script>
+</body>
+</html>
