@@ -48,7 +48,7 @@
 <script>
 (function () {
 "use strict";
-var POS = window.POS = {};
+var POS = window.POS = { version: "0.1.1" };
 var cfg = null, session = null, staff = null, shop = null, categories = [], menu = [];
 var state = { tab: "bill", cat: "all", cart: new Map(), busy: false, uncertain: false, taxLocked: false, receipt: null, recent: [], detail: null };
 var root = document.getElementById("root");
@@ -110,6 +110,17 @@ function authCall(path, body, token) {
   return timeoutFetch(cfg.supabaseUrl + "/auth/v1/" + path, { method: "POST", headers: headers, body: JSON.stringify(body || {}) });
 }
 function toSession(d) { return { access_token: d.access_token, refresh_token: d.refresh_token, expires_at: Math.floor(Date.now() / 1000) + (d.expires_in || 3600), user_id: d.user && d.user.id, email: d.user && d.user.email }; }
+/* Says WHY a sign-in was refused, using only the status and the error code Supabase returned. Never echoes the email, password or key. */
+POS.loginMessage = function (e) {
+  if (e && e.network) return errText(e);
+  var st = e && e.status, code = e && e.code, msg = (e && e.message) || "";
+  if (code === "email_not_confirmed" || /not confirmed/i.test(msg)) return "Sign-in failed: this email has not been confirmed in Supabase. An admin must confirm it.";
+  if (code === "invalid_credentials" || /invalid login credentials/i.test(msg)) return "Sign-in failed: wrong email or password.";
+  if (st === 401 || st === 403 || /api key/i.test(msg)) return "Sign-in failed: the app's key was rejected (HTTP " + st + "). Check supabaseKey in config.json.";
+  if (st === 429 || /rate limit/i.test(code || "") || /rate limit/i.test(msg)) return "Sign-in failed: too many attempts. Wait a few minutes and try again.";
+  if (code === "user_banned") return "Sign-in failed: this account is blocked.";
+  return "Sign-in failed (HTTP " + st + (code ? ", " + code : "") + ").";
+};
 POS.signIn = function (email, password) {
   return authCall("token?grant_type=password", { email: email, password: password }).then(function (res) { return readJson(res).then(function (d) {
     if (!res.ok) throw new ApiError(res.status, (d && (d.error_code || d.error)) || "auth", (d && (d.msg || d.error_description || d.message)) || "Sign-in failed");
@@ -236,9 +247,9 @@ function loginView() {
   var em = h("input", { id: "email", type: "email", autocomplete: "username", inputmode: "email" }), pw = h("input", { id: "password", type: "password", autocomplete: "current-password" });
   var btn = h("button", { id: "login-btn", class: "primary", text: "Sign in", onclick: function () {
     btn.disabled = true; err.classList.add("hidden");
-    POS.signIn(em.value.trim(), pw.value).then(afterLogin).catch(function (e) { err.textContent = e.network ? errText(e) : "Sign-in failed. Check the email and password."; err.classList.remove("hidden"); }).then(function () { btn.disabled = false; pw.value = ""; });
+    POS.signIn(em.value.trim(), pw.value).then(afterLogin).catch(function (e) { err.textContent = POS.loginMessage(e); err.classList.remove("hidden"); }).then(function () { btn.disabled = false; pw.value = ""; });
   } });
-  root.appendChild(h("div", {}, [h("h1", { text: "Sign in" }), err, h("label", { text: "Email" }), em, h("label", { text: "Password" }), pw, h("p"), btn]));
+  root.appendChild(h("div", {}, [h("h1", { text: "Sign in" }), h("div", { class: "muted", id: "app-version", text: "app v" + POS.version }), err, h("label", { text: "Email" }), em, h("label", { text: "Password" }), pw, h("p"), btn]));
 }
 function afterLogin() {
   clear(root); root.appendChild(h("p", { class: "muted", text: "Loading..." }));
@@ -432,7 +443,7 @@ function loadDay(date, out) {
 /* --- settings --- */
 function settingsView() {
   root.appendChild(header("Settings"));
-  root.appendChild(h("p", { class: "muted", id: "env-info", text: "Environment: " + cfg.env + " | project " + projectRef() + " | device " + deviceId() }));
+  root.appendChild(h("p", { class: "muted", id: "env-info", text: "Environment: " + cfg.env + " | project " + projectRef() + " | device " + deviceId() + " | app v" + POS.version }));
   var sel = h("select", { id: "printer-mode", onchange: function (e) { localStorage.setItem("pos.printer.mode", e.target.value); } }, [["auto", "Auto: USB, then buttons"], ["webusb", "USB only"], ["rawbt", "RawBT app"], ["browser", "Browser print"], ["none", "No auto print"]].map(function (o) { return h("option", { value: o[0], text: o[1] }); }));
   sel.value = printerMode(); root.appendChild(h("label", { text: "Printing" })); root.appendChild(sel);
   var test = { id: "x" };
