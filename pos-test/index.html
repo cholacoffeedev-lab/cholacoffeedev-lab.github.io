@@ -35,6 +35,11 @@
   pre.receipt { background:#fff; color:#000; padding:.6rem; border:1px solid var(--line); overflow-x:auto; font-size:.72rem; line-height:1.25; }
   .muted { color:var(--mut); } .tag { font-size:.75rem; padding:.1rem .4rem; border-radius:.3rem; background:var(--bad); color:#fff; }
   .hidden { display:none !important; } label { display:block; font-size:.85rem; color:var(--mut); margin:.5rem 0 .15rem; }
+  nav button { padding:.7rem .15rem; font-size:.88rem; }
+  .brow { display:block; width:100%; text-align:left; padding:.5rem .6rem; margin:.25rem 0; } .brow .btop { display:flex; justify-content:space-between; gap:.5rem; }
+  .btrack { display:block; height:.7rem; background:var(--line); border-radius:.35rem; overflow:hidden; margin-top:.35rem; } .bfill { display:block; height:100%; background:var(--acc); }
+  .trend { display:flex; align-items:stretch; gap:2px; height:9rem; margin-top:.5rem; } .tcol { flex:1; min-width:0; display:flex; flex-direction:column; align-items:center; } .tarea { flex:1; width:100%; display:flex; align-items:flex-end; }
+  .tbar { width:100%; background:var(--acc); border-radius:.2rem .2rem 0 0; } .tlab { font-size:.62rem; color:var(--mut); margin-top:.15rem; white-space:nowrap; overflow:hidden; }
   table { width:100%; border-collapse:collapse; font-size:.9rem; } td, th { padding:.3rem .2rem; border-bottom:1px solid var(--line); text-align:right; } td:first-child, th:first-child { text-align:left; }
 </style>
 </head>
@@ -43,12 +48,12 @@
 <div id="offline" class="banner warn hidden">No connection. Billing is paused until it returns.</div>
 <main id="root"></main>
 <nav id="nav" class="hidden">
-  <button data-tab="bill">Bill</button><button data-tab="recent">Recent</button><button data-tab="menu" class="hidden">Menu</button><button data-tab="admin" class="hidden">Day</button><button data-tab="settings">Settings</button>
+  <button data-tab="bill">Bill</button><button data-tab="recent">Recent</button><button data-tab="menu" class="hidden">Menu</button><button data-tab="sales" class="hidden">Sales</button><button data-tab="admin" class="hidden">Day</button><button data-tab="settings">Settings</button>
 </nav>
 <script>
 (function () {
 "use strict";
-var POS = window.POS = { version: "0.3.0" };
+var POS = window.POS = { version: "0.4.0" };
 var cfg = null, session = null, staff = null, shop = null, categories = [], menu = [];
 var state = { tab: "bill", cat: "all", cart: new Map(), busy: false, uncertain: null, taxLocked: false, receipt: null, recent: [], detail: null };
 var root = document.getElementById("root");
@@ -275,12 +280,13 @@ function buildNav() {
   var nav = $("nav"); nav.classList.remove("hidden");
   nav.querySelector('[data-tab="admin"]').classList.toggle("hidden", staff.role !== "admin");
   nav.querySelector('[data-tab="menu"]').classList.toggle("hidden", staff.role !== "admin");
+  nav.querySelector('[data-tab="sales"]').classList.toggle("hidden", staff.role !== "admin");
   Array.prototype.forEach.call(nav.querySelectorAll("button"), function (b) { b.onclick = function () { show(b.getAttribute("data-tab")); }; });
 }
 function show(tab) {
   state.tab = tab; Array.prototype.forEach.call($("nav").querySelectorAll("button"), function (b) { b.classList.toggle("on", b.getAttribute("data-tab") === tab); });
   clear(root); root.appendChild(h("div", { id: "status", class: "msg hidden" }));
-  ({ bill: billView, recent: recentView, admin: adminView, menu: menuView, settings: settingsView })[tab]();
+  ({ bill: billView, recent: recentView, admin: adminView, menu: menuView, sales: salesView, settings: settingsView })[tab]();
 }
 function header(title) { return h("div", { class: "bar" }, [h("h1", { text: title }), h("span", { class: "muted", id: "who", text: staff.name + " (" + staff.role + ")" })]); }
 
@@ -548,6 +554,78 @@ function saveItem(it) {
     if (!rows || rows.length !== 1) throw new ApiError(403, "no_rows", "The change was not saved (your login may not be allowed to edit the menu).");
     return loadMenu();
   }).then(function () { show("menu"); status("Saved: " + nm + " " + money.fmt(pr) + ".", "ok"); }, function (e) { btn.disabled = false; status("Not saved: " + errText(e), "bad"); });
+}
+
+/* --- sales analysis: admin screen, read-only. Every figure comes from the database functions in 07_sales_report.sql. --- */
+var sv = { mode: "month", date: null, cat: null, by: "amount" };
+var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+function ymd(d) { return d.getUTCFullYear() + "-" + String(d.getUTCMonth() + 1).padStart(2, "0") + "-" + String(d.getUTCDate()).padStart(2, "0"); }
+function parseYmd(t) { return new Date(t + "T00:00:00Z"); }
+function addDays(t, n) { var d = parseYmd(t); d.setUTCDate(d.getUTCDate() + n); return ymd(d); }
+POS.period = function (mode, dateStr) {
+  var d = parseYmd(dateStr), from, to, label, f = function (t, o) { return new Intl.DateTimeFormat("en-IN", Object.assign({ timeZone: "UTC" }, o)).format(parseYmd(t)); };
+  if (mode === "day") { from = to = dateStr; label = f(dateStr, { day: "numeric", month: "short", year: "numeric" }); }
+  else if (mode === "week") { from = addDays(dateStr, -((d.getUTCDay() + 6) % 7)); to = addDays(from, 6); label = f(from, { day: "numeric", month: "short" }) + " - " + f(to, { day: "numeric", month: "short", year: "numeric" }); }
+  else if (mode === "month") { from = ymd(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1))); to = ymd(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0))); label = f(from, { month: "long", year: "numeric" }); }
+  else { from = d.getUTCFullYear() + "-01-01"; to = d.getUTCFullYear() + "-12-31"; label = String(d.getUTCFullYear()); }
+  return { mode: mode, from: from, to: to, label: label };
+};
+POS.shiftPeriod = function (mode, dateStr, dir) {
+  var p = POS.period(mode, dateStr); if (mode === "day") return addDays(dateStr, dir); if (mode === "week") return addDays(p.from, 7 * dir);
+  var d = parseYmd(p.from); if (mode === "month") d.setUTCMonth(d.getUTCMonth() + dir); else d.setUTCFullYear(d.getUTCFullYear() + dir); return ymd(d);
+};
+function salesView() {
+  root.appendChild(header("Sales")); if (!sv.date) sv.date = istDate();
+  var box = h("div", { id: "sales-box" }); root.appendChild(box); loadSales(box);
+}
+function loadSales(box) {
+  var p = POS.period(sv.mode, sv.date), bucket = sv.mode === "year" ? "month" : "day"; clear(box); box.appendChild(h("p", { class: "muted", text: "Loading..." }));
+  Promise.all([api("POST", "/rpc/sales_summary", { p_from: p.from, p_to: p.to }), api("POST", "/rpc/sales_by_item", { p_from: p.from, p_to: p.to }), api("POST", "/rpc/sales_trend", { p_from: p.from, p_to: p.to, p_bucket: bucket })])
+    .then(function (r) { renderSales(box, p, r[0][0] || {}, r[1] || [], r[2] || []); })
+    .catch(function (e) { clear(box); status("Could not load the sales report: " + errText(e) + (e.status === 404 ? " (Has the database update 07_sales_report.sql been run?)" : ""), "bad"); });
+}
+function barRow(label, amount, qty, widthBase, total, byQty, onclick) {
+  var pct = widthBase > 0 ? Math.max(2, Math.round((byQty ? qty : amount) * 100 / widthBase)) : 0, share = total > 0 ? (Math.round(amount * 1000 / total) / 10).toFixed(1) : "0.0";
+  return h("button", { class: "brow", "data-label": label, "data-paise": String(amount), "data-qty": String(qty), onclick: onclick || function () {} }, [
+    h("span", { class: "btop" }, [h("span", { class: "blabel", text: label }), h("span", { class: "bval", text: money.fmt(amount) + "  (" + qty + " sold, " + share + "%)" })]),
+    h("span", { class: "btrack" }, [h("span", { class: "bfill", style: "width:" + pct + "%" })])]);
+}
+function renderSales(box, p, sum, items, trend) {
+  clear(box); var total = sum.sales_paise || 0, today = istDate();
+  box.appendChild(h("div", { class: "chips", id: "sales-modes" }, [["day", "Day"], ["week", "Week"], ["month", "Month"], ["year", "Year"]].map(function (m) {
+    return h("button", { class: sv.mode === m[0] ? "on" : "", "data-mode": m[0], text: m[1], onclick: function () { sv.mode = m[0]; sv.cat = null; loadSales(box); } }); })));
+  var canNext = POS.period(sv.mode, POS.shiftPeriod(sv.mode, sv.date, 1)).from <= today;
+  var dateIn = h("input", { id: "sales-date", type: "date", value: sv.date });
+  var go = function () { if (/^\d{4}-\d{2}-\d{2}$/.test(dateIn.value) && dateIn.value !== sv.date) { sv.date = dateIn.value; sv.cat = null; loadSales(box); } };
+  dateIn.addEventListener("change", go); dateIn.addEventListener("input", go);
+  box.appendChild(h("div", { class: "bar" }, [h("button", { id: "sales-prev", text: "<", onclick: function () { sv.date = POS.shiftPeriod(sv.mode, sv.date, -1); sv.cat = null; loadSales(box); } }), h("strong", { id: "sales-label", text: p.label }),
+    h("button", { id: "sales-next", text: ">", disabled: !canNext, onclick: function () { sv.date = POS.shiftPeriod(sv.mode, sv.date, 1); sv.cat = null; loadSales(box); } })]));
+  box.appendChild(dateIn);
+  box.appendChild(h("div", { class: "msg", id: "sales-summary" }, [h("div", { id: "sales-total", "data-paise": String(total), text: "Sales " + money.fmt(total) }),
+    h("div", { class: "muted", id: "sales-counts", text: (sum.bills_count || 0) + " bills, " + (sum.items_sold || 0) + " items" + (sum.voided_count ? ", " + sum.voided_count + " voided (not counted)" : "") }),
+    h("div", { class: "muted", id: "sales-refunds", "data-paise": String(sum.refunded_paise || 0), text: "Refunds in this period: " + money.fmt(sum.refunded_paise || 0) + " (shown separately; refunds are not tied to items)" })]));
+  if (!items.length) { box.appendChild(h("p", { class: "muted", id: "sales-empty", text: "No sales in this period." })); return; }
+  var byQty = sv.by === "qty", key = function (x) { return byQty ? x.qty : x.amount; };
+  box.appendChild(h("div", { class: "chips", id: "sales-by" }, [["amount", "By amount"], ["qty", "By quantity"]].map(function (m) {
+    return h("button", { class: sv.by === m[0] ? "on" : "", "data-by": m[0], text: m[1], onclick: function () { sv.by = m[0]; renderSales(box, p, sum, items, trend); } }); })));
+  var cats = {}; items.forEach(function (i) { var c = cats[i.category] = cats[i.category] || { name: i.category, amount: 0, qty: 0 }; c.amount += i.amount_paise; c.qty += i.qty; });
+  var catList = Object.keys(cats).map(function (k) { return cats[k]; }).sort(function (a, b) { return key(b) - key(a) || (a.name < b.name ? -1 : 1); });
+  box.appendChild(h("h2", { text: "Sales by category" })); var cbox = h("div", { id: "sales-cats" }); box.appendChild(cbox);
+  catList.forEach(function (c) { cbox.appendChild(barRow(c.name, c.amount, c.qty, key(catList[0]), total, byQty, function () { sv.cat = c.name; renderSales(box, p, sum, items, trend); })); });
+  var shown = (sv.cat ? items.filter(function (i) { return i.category === sv.cat; }) : items).map(function (i) { return { name: i.item, amount: i.amount_paise, qty: i.qty }; }).sort(function (a, b) { return key(b) - key(a) || (a.name < b.name ? -1 : 1); });
+  box.appendChild(h("h2", { id: "sales-items-title", text: sv.cat ? "Items in " + sv.cat : "Top items" + (shown.length > 10 ? " (10 of " + shown.length + ")" : "") }));
+  if (sv.cat) box.appendChild(h("button", { id: "sales-back", text: "Back to all categories", onclick: function () { sv.cat = null; renderSales(box, p, sum, items, trend); } }));
+  var ibox = h("div", { id: "sales-items" }); box.appendChild(ibox); var top = sv.cat ? shown : shown.slice(0, 10);
+  top.forEach(function (x) { ibox.appendChild(barRow(x.name, x.amount, x.qty, top.length ? key(top[0]) : 0, total, byQty)); });
+  if (sv.mode !== "day") {
+    var slots = [], got = {}; trend.forEach(function (t) { got[t.bucket] = t.amount_paise; });
+    if (sv.mode === "year") for (var m = 0; m < 12; m++) { var k = p.from.slice(0, 4) + "-" + String(m + 1).padStart(2, "0") + "-01"; slots.push({ k: k, lab: MONTHS[m] }); }
+    else for (var d = p.from; d <= p.to; d = addDays(d, 1)) slots.push({ k: d, lab: sv.mode === "week" ? WEEKDAYS[(parseYmd(d).getUTCDay() + 6) % 7] : String(parseInt(d.slice(8), 10)) });
+    var max = Math.max.apply(null, slots.map(function (x) { return got[x.k] || 0; }).concat([1]));
+    box.appendChild(h("h2", { text: sv.mode === "year" ? "Sales per month" : "Sales per day" })); var tr = h("div", { class: "trend", id: "sales-trend" }); box.appendChild(tr);
+    slots.forEach(function (x) { var v = got[x.k] || 0; tr.appendChild(h("div", { class: "tcol", "data-bucket": x.k, "data-paise": String(v) }, [h("div", { class: "tarea" }, [h("div", { class: "tbar", style: "height:" + (v ? Math.max(2, Math.round(v * 100 / max)) : 0) + "%" })]), h("div", { class: "tlab", text: x.lab })])); });
+    box.appendChild(h("p", { class: "muted", id: "sales-trend-max", text: "Tallest bar: " + money.fmt(max === 1 && !trend.length ? 0 : max) }));
+  }
 }
 
 /* --- settings --- */
