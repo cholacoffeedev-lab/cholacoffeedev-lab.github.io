@@ -1,0 +1,7 @@
+{
+  "env": "production",
+  "supabaseUrl": "https://yimcyuoabdcolxcolmkn.supabase.co",
+  "supabaseKey": "sb_publishable_972Q7mqz-JKz6NzpYyJaQg_Fu3nvqWI",
+  "deviceName": "counter-phone",
+  "printer": { "vendorId": 1155, "columns": 48, "mode": "auto" }
+}
