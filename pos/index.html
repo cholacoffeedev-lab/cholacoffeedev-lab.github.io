@@ -53,7 +53,7 @@
 <script>
 (function () {
 "use strict";
-var POS = window.POS = { version: "0.4.1" };
+var POS = window.POS = { version: "0.4.2" };
 var cfg = null, session = null, staff = null, shop = null, categories = [], menu = [];
 var state = { tab: "bill", cat: "all", cart: new Map(), busy: false, uncertain: null, taxLocked: false, receipt: null, recent: [], detail: null };
 var root = document.getElementById("root");
@@ -178,7 +178,7 @@ POS.receiptLines = function (r, shopCfg, cols, duplicate) {
   (r.payments || []).forEach(function (p) { add(lr(p.mode, money.plain(p.amount_paise), C)); });
   add(rule);
   if (shopCfg.footer_note) wrap(shopCfg.footer_note, C).forEach(function (l) { add(l, { center: true }); });
-  add("Thank you!", { center: true });
+  else add("Thank you!", { center: true });          /* the default line only when the shop has not set its own footer */
   return L;
 };
 POS.escpos = function (lines, cols) {
