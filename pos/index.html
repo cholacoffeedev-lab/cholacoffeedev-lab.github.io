@@ -5,9 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.supabase.co; img-src 'self' data:; base-uri 'none'; form-action 'none'">
 <title>POS</title>
+<script>(function () { try { var m = localStorage.getItem("pos.theme"), d = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches; document.documentElement.setAttribute("data-theme", m === "light" ? "light" : m === "night" ? "night" : (d ? "night" : "light")); } catch (e) {} })();</script>
 <style>
-  :root { --bg:#fff; --fg:#1a1a1a; --mut:#666; --card:#f3f3f6; --line:#d4d4dc; --acc:#1b5fd1; --ok:#127a3b; --bad:#b3261e; --warn:#8a5a00; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#141416; --fg:#ececf0; --mut:#a0a0aa; --card:#212126; --line:#3a3a42; --acc:#6aa0ff; --ok:#58c47f; --bad:#ff8a80; --warn:#f0b955; } }
+  /* LIGHT: white background, black text, slightly heavier strokes (--ink). NIGHT: the original dark palette, unchanged. */
+  :root, :root[data-theme="light"] { --bg:#ffffff; --fg:#000000; --mut:#262626; --card:#f0f0f0; --line:#8c8c8c; --acc:#0b46a8; --ok:#0a5c28; --bad:#a30000; --warn:#7a4a00; --ink:0.009em; color-scheme: light; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme]) { --bg:#141416; --fg:#ececf0; --mut:#a0a0aa; --card:#212126; --line:#3a3a42; --acc:#6aa0ff; --ok:#58c47f; --bad:#ff8a80; --warn:#f0b955; --ink:0; color-scheme: dark; } }
+  :root[data-theme="night"] { --bg:#141416; --fg:#ececf0; --mut:#a0a0aa; --card:#212126; --line:#3a3a42; --acc:#6aa0ff; --ok:#58c47f; --bad:#ff8a80; --warn:#f0b955; --ink:0; color-scheme: dark; }
+  body, button, input, select { -webkit-text-stroke: var(--ink) currentColor; }
   * { box-sizing: border-box; }
   body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   main { max-width: 640px; margin: 0 auto; padding: .5rem .75rem 5rem; }
@@ -21,7 +25,8 @@
   .banner { padding:.45rem .75rem; font-size:.9rem; text-align:center; font-weight:600; }
   .banner.test { background:#b3261e; color:#fff; } .banner.prod { background:var(--card); color:var(--mut); font-weight:400; }
   .banner.warn { background:var(--warn); color:#fff; }
-  .bar { display:flex; justify-content:space-between; align-items:center; gap:.5rem; padding:.4rem 0; }
+  .bar { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem; padding:.4rem 0; }
+  .themebtn { min-height:2rem; padding:.2rem .6rem; font-size:.8rem; }
   nav { position:fixed; bottom:0; left:0; right:0; display:flex; background:var(--card); border-top:1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
   nav button { flex:1; border:0; border-radius:0; background:none; } nav button.on { color:var(--acc); font-weight:700; }
   .chips { display:flex; gap:.4rem; overflow-x:auto; padding:.3rem 0; } .chips button { white-space:nowrap; } .chips button.on { background:var(--acc); color:#fff; }
@@ -32,7 +37,7 @@
   .total { font-size:1.35rem; font-weight:700; display:flex; justify-content:space-between; padding:.5rem 0; }
   .pay { display:grid; grid-template-columns:5rem 1fr auto; gap:.4rem; align-items:center; margin:.3rem 0; }
   .msg { padding:.6rem; border-radius:.5rem; margin:.5rem 0; background:var(--card); } .msg.ok { color:var(--ok); } .msg.bad { color:var(--bad); } .msg.warn { color:var(--warn); }
-  pre.receipt { background:#fff; color:#000; padding:.6rem; border:1px solid var(--line); overflow-x:auto; font-size:.72rem; line-height:1.25; }
+  pre.receipt { -webkit-text-stroke:0; background:#fff; color:#000; padding:.6rem; border:1px solid var(--line); overflow-x:auto; font-size:.72rem; line-height:1.25; }
   .muted { color:var(--mut); } .tag { font-size:.75rem; padding:.1rem .4rem; border-radius:.3rem; background:var(--bad); color:#fff; }
   .hidden { display:none !important; } label { display:block; font-size:.85rem; color:var(--mut); margin:.5rem 0 .15rem; }
   nav button { padding:.7rem .15rem; font-size:.88rem; }
@@ -53,10 +58,19 @@
 <script>
 (function () {
 "use strict";
-var POS = window.POS = { version: "0.4.2" };
+var POS = window.POS = { version: "0.5.0" };
 var cfg = null, session = null, staff = null, shop = null, categories = [], menu = [];
 var state = { tab: "bill", cat: "all", cart: new Map(), busy: false, uncertain: null, taxLocked: false, receipt: null, recent: [], detail: null };
 var root = document.getElementById("root");
+
+/* ---------- theme: Automatic (follow the phone) / Light / Night, remembered on this device ---------- */
+function themeMode() { try { var m = localStorage.getItem("pos.theme"); return m === "light" || m === "night" ? m : "auto"; } catch (e) { return "auto"; } }
+function themeResolved() { var m = themeMode(); if (m !== "auto") return m; return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "night" : "light"; }
+function applyTheme() { document.documentElement.setAttribute("data-theme", themeResolved()); }
+POS.setTheme = function (m) { try { if (m === "light" || m === "night") localStorage.setItem("pos.theme", m); else localStorage.removeItem("pos.theme"); } catch (e) {} applyTheme(); };
+POS.theme = function () { return { mode: themeMode(), shown: themeResolved() }; };
+if (window.matchMedia) { var themeMq = window.matchMedia("(prefers-color-scheme: dark)"), themeHandler = function () { if (themeMode() === "auto") applyTheme(); };
+  if (themeMq.addEventListener) themeMq.addEventListener("change", themeHandler); else if (themeMq.addListener) themeMq.addListener(themeHandler); }
 
 /* ---------- small helpers: DOM is built with textContent only, never innerHTML ---------- */
 function h(tag, attrs, kids) {
@@ -261,7 +275,7 @@ function loginView() {
     btn.disabled = true; err.classList.add("hidden");
     POS.signIn(em.value.trim(), pw.value).then(afterLogin).catch(function (e) { err.textContent = POS.loginMessage(e); err.classList.remove("hidden"); }).then(function () { btn.disabled = false; pw.value = ""; });
   } });
-  root.appendChild(h("div", {}, [h("h1", { text: "Sign in" }), h("div", { class: "muted", id: "app-version", text: "app v" + POS.version }), err, h("label", { text: "Email" }), em, h("label", { text: "Password" }), pw, h("p"), btn]));
+  root.appendChild(h("div", {}, [h("h1", { text: "Sign in" }), h("div", { class: "muted", id: "app-version", text: "app v" + POS.version }), themeBtn(), err, h("label", { text: "Email" }), em, h("label", { text: "Password" }), pw, h("p"), btn]));
 }
 function afterLogin() {
   clear(root); root.appendChild(h("p", { class: "muted", text: "Loading..." }));
@@ -288,7 +302,12 @@ function show(tab) {
   clear(root); root.appendChild(h("div", { id: "status", class: "msg hidden" }));
   ({ bill: billView, recent: recentView, admin: adminView, menu: menuView, sales: salesView, settings: settingsView })[tab]();
 }
-function header(title) { return h("div", { class: "bar" }, [h("h1", { text: title }), h("span", { class: "muted", id: "who", text: staff.name + " (" + staff.role + ")" })]); }
+function themeBtn() {
+  var b = h("button", { id: "theme-quick", class: "themebtn", "aria-label": "Switch between light and night mode", text: themeResolved() === "light" ? "Night mode" : "Light mode",
+    onclick: function () { POS.setTheme(themeResolved() === "light" ? "night" : "light"); b.textContent = themeResolved() === "light" ? "Night mode" : "Light mode"; } });
+  return b;
+}
+function header(title) { return h("div", { class: "bar" }, [h("h1", { text: title }), h("span", { class: "muted", id: "who", text: staff.name + " (" + staff.role + ")" }), themeBtn()]); }
 
 /* --- billing --- */
 function cartLines() { var out = []; state.cart.forEach(function (q, id) { var m = menu.filter(function (x) { return x.id === id; })[0]; if (m) out.push({ m: m, q: q }); }); return out; }
@@ -641,6 +660,9 @@ function settingsView() {
     var r = { bill_no: 0, created_at: new Date().toISOString(), cashier: staff.name, customer_name: null, subtotal_paise: 1000, tax_paise: 0, total_paise: 1000, items: [{ name: "PRINTER TEST", qty: 1, unit_price_paise: 1000, line_total_paise: 1000, line_tax_paise: 0 }], payments: [{ mode: "Cash", amount_paise: 1000 }] };
     status("Printing...", ""); POS.printReceipt(r, { mode: mode, interactive: interactive }).then(function (m) { status(m, "ok"); }, function (e) { status("Print failed: " + errText(e), "bad"); }); } }); };
   root.appendChild(h("div", { class: "grid" }, [mk("pair-printer", "Pair printer and test (USB)", "webusb", true), mk("test-rawbt", "Test via RawBT", "rawbt", true), mk("test-browser", "Test via browser print", "browser", true)]));
+  root.appendChild(h("h2", { text: "Appearance" }));
+  var tsel = h("select", { id: "theme-mode", onchange: function (e) { POS.setTheme(e.target.value); show("settings"); } }, [["auto", "Automatic (follow the phone)"], ["light", "Light: white background, black text"], ["night", "Night: dark background, light text"]].map(function (o) { return h("option", { value: o[0], text: o[1] }); }));
+  tsel.value = themeMode(); root.appendChild(tsel);
   root.appendChild(h("h2", { text: "Session" }));
   root.appendChild(h("button", { id: "logout", class: "danger", text: "Sign out", onclick: function () {
     var tok = session && session.access_token; saveSession(null); staff = null; state.cart.clear(); state.receipt = null;
